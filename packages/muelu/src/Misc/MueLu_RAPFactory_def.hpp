@@ -45,9 +45,10 @@ RCP<const ParameterList> RAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   SET_VALID_ENTRY("rap: fix zero diagonals replacement");
   SET_VALID_ENTRY("rap: relative diagonal floor");
 #undef SET_VALID_ENTRY
-  validParamList->set<RCP<const FactoryBase> >("A", null, "Generating factory of the matrix A used during the prolongator smoothing process");
-  validParamList->set<RCP<const FactoryBase> >("P", null, "Prolongator factory");
-  validParamList->set<RCP<const FactoryBase> >("R", null, "Restrictor factory");
+  validParamList->set<RCP<const FactoryBase>>("MinvA", null, "CoalesceDropFactory Makes the first one");
+  validParamList->set<RCP<const FactoryBase>>("A", null, "Generating factory of the matrix A used during the prolongator smoothing process");
+  validParamList->set<RCP<const FactoryBase>>("P", null, "Prolongator factory");
+  validParamList->set<RCP<const FactoryBase>>("R", null, "Restrictor factory");
 
   validParamList->set<bool>("CheckMainDiagonal", false, "Check main diagonal for zeros");
   validParamList->set<bool>("RepairMainDiagonal", false, "Repair zeros on main diagonal");
@@ -63,6 +64,7 @@ RCP<const ParameterList> RAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 void RAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::DeclareInput(Level& fineLevel, Level& coarseLevel) const {
   const Teuchos::ParameterList& pL = GetParameterList();
+  Input(fineLevel, "MinvA");
   if (pL.get<bool>("transpose: use implicit") == false)
     Input(coarseLevel, "R");
 
@@ -70,7 +72,7 @@ void RAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::DeclareInput(Level& 
   Input(coarseLevel, "P");
 
   // call DeclareInput of all user-given transfer factories
-  for (std::vector<RCP<const FactoryBase> >::const_iterator it = transferFacts_.begin(); it != transferFacts_.end(); ++it)
+  for (std::vector<RCP<const FactoryBase>>::const_iterator it = transferFacts_.begin(); it != transferFacts_.end(); ++it)
     (*it)->CallDeclareInput(coarseLevel);
 
   hasDeclaredInput_ = true;
@@ -82,6 +84,8 @@ void RAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Level& fineLev
   const bool doFillComplete    = true;
   const bool doOptimizeStorage = true;
   RCP<Matrix> Ac;
+  RCP<Matrix> MinvAc, MinvA, MinvAP;
+  bool doingMinvA = false;
   {
     FactoryMonitor m(*this, "Computing Ac", coarseLevel);
     std::ostringstream levelstr;
@@ -92,13 +96,19 @@ void RAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Level& fineLev
                                "MueLu::RAPFactory::Build(): CallDeclareInput has not been called before Build!");
 
     const Teuchos::ParameterList& pL = GetParameterList();
-    RCP<Matrix> A                    = Get<RCP<Matrix> >(fineLevel, "A");
-    RCP<Matrix> P                    = Get<RCP<Matrix> >(coarseLevel, "P"), AP;
+    RCP<Matrix> A                    = Get<RCP<Matrix>>(fineLevel, "A");
+    RCP<Matrix> P                    = Get<RCP<Matrix>>(coarseLevel, "P"), AP;
+    if (fineLevel.IsAvailable("MinvA", NoFactory::get())) {
+      MinvA      = fineLevel.Get<RCP<Matrix>>("MinvA", NoFactory::get());
+      doingMinvA = true;
+    }
     // We don't have a valid P (e.g., # global aggregates = 0) so we bail.
     // This level will ultimately be removed in MueLu_Hierarchy_defs.h via a resize()
     if (P == Teuchos::null) {
       Ac = Teuchos::null;
       Set(coarseLevel, "A", Ac);
+      MinvAc = Teuchos::null;
+      if (doingMinvA) coarseLevel.Set("MinvA", MinvAc, NoFactory::get());
       return;
     }
 
@@ -121,10 +131,10 @@ void RAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Level& fineLev
       if (coarseLevel.IsAvailable("AP reuse data", this)) {
         GetOStream(static_cast<MsgType>(Runtime0 | Test)) << "Reusing previous AP data" << std::endl;
 
-        APparams = coarseLevel.Get<RCP<ParameterList> >("AP reuse data", this);
+        APparams = coarseLevel.Get<RCP<ParameterList>>("AP reuse data", this);
 
         if (APparams->isParameter("graph"))
-          AP = APparams->get<RCP<Matrix> >("graph");
+          AP = APparams->get<RCP<Matrix>>("graph");
       }
 
       {
@@ -132,6 +142,9 @@ void RAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Level& fineLev
 
         AP = MatrixMatrix::Multiply(*A, !doTranspose, *P, !doTranspose, AP, GetOStream(Statistics2),
                                     doFillComplete, doOptimizeStorage, labelstr + std::string("MueLu::A*P-") + levelstr.str(), APparams);
+        if (doingMinvA)
+          MinvAP = MatrixMatrix::Multiply(*MinvA, !doTranspose, *P, !doTranspose, MinvAP, GetOStream(Statistics2),
+                                          doFillComplete, doOptimizeStorage, labelstr + std::string("MueLu::MinvA*P-") + levelstr.str(), APparams);
       }
 
       // Reuse coarse matrix memory if available (multiple solve)
@@ -142,10 +155,10 @@ void RAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Level& fineLev
       if (coarseLevel.IsAvailable("RAP reuse data", this)) {
         GetOStream(static_cast<MsgType>(Runtime0 | Test)) << "Reusing previous RAP data" << std::endl;
 
-        RAPparams = coarseLevel.Get<RCP<ParameterList> >("RAP reuse data", this);
+        RAPparams = coarseLevel.Get<RCP<ParameterList>>("RAP reuse data", this);
 
         if (RAPparams->isParameter("graph"))
-          Ac = RAPparams->get<RCP<Matrix> >("graph");
+          Ac = RAPparams->get<RCP<Matrix>>("graph");
 
         // Some eigenvalue may have been cached with the matrix in the previous run.
         // As the matrix values will be updated, we need to reset the eigenvalue.
@@ -165,17 +178,23 @@ void RAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Level& fineLev
 
         Ac = MatrixMatrix::Multiply(*P, doTranspose, *AP, !doTranspose, Ac, GetOStream(Statistics2),
                                     doFillComplete, doOptimizeStorage, labelstr + std::string("MueLu::R*(AP)-implicit-") + levelstr.str(), RAPparams);
+        if (doingMinvA)
+          MinvAc = MatrixMatrix::Multiply(*P, doTranspose, *MinvAP, !doTranspose, MinvAc, GetOStream(Statistics2),
+                                          doFillComplete, doOptimizeStorage, labelstr + std::string("MueLu::R*(MinvAP)-implicit-") + levelstr.str(), RAPparams);
 
       } else {
-        RCP<Matrix> R = Get<RCP<Matrix> >(coarseLevel, "R");
+        RCP<Matrix> R = Get<RCP<Matrix>>(coarseLevel, "R");
 
         SubFactoryMonitor m2(*this, "MxM: R x (AP) (explicit)", coarseLevel);
 
         Ac = MatrixMatrix::Multiply(*R, !doTranspose, *AP, !doTranspose, Ac, GetOStream(Statistics2),
                                     doFillComplete, doOptimizeStorage, labelstr + std::string("MueLu::R*(AP)-explicit-") + levelstr.str(), RAPparams);
+        if (doingMinvA)
+          MinvAc = MatrixMatrix::Multiply(*R, !doTranspose, *MinvAP, !doTranspose, MinvAc, GetOStream(Statistics2),
+                                          doFillComplete, doOptimizeStorage, labelstr + std::string("MueLu::R*(MinvAP)-explicit-") + levelstr.str(), RAPparams);
       }
 
-      Teuchos::ArrayView<const double> relativeFloor = pL.get<Teuchos::Array<double> >("rap: relative diagonal floor")();
+      Teuchos::ArrayView<const double> relativeFloor = pL.get<Teuchos::Array<double>>("rap: relative diagonal floor")();
       if (relativeFloor.size() > 0) {
         Xpetra::MatrixUtils<SC, LO, GO, NO>::RelativeDiagonalBoost(Ac, relativeFloor, GetOStream(Statistics2));
       }
@@ -207,7 +226,14 @@ void RAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Level& fineLev
         oss << "A_" << coarseLevel.GetLevelID();
         Ac->setObjectLabel(oss.str());
       }
+      if (!MinvAc.is_null()) {
+        std::ostringstream oss;
+        oss << "MinvA_" << coarseLevel.GetLevelID();
+        MinvAc->setObjectLabel(oss.str());
+      }
+
       Set(coarseLevel, "A", Ac);
+      if (doingMinvA) coarseLevel.Set("MinvA", MinvAc, NoFactory::get());
 
       if (!isGPU) {
         APparams->set("graph", AP);
@@ -225,10 +251,10 @@ void RAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Level& fineLev
       if (coarseLevel.IsAvailable("RAP reuse data", this)) {
         GetOStream(static_cast<MsgType>(Runtime0 | Test)) << "Reusing previous RAP data" << std::endl;
 
-        RAPparams = coarseLevel.Get<RCP<ParameterList> >("RAP reuse data", this);
+        RAPparams = coarseLevel.Get<RCP<ParameterList>>("RAP reuse data", this);
 
         if (RAPparams->isParameter("graph"))
-          Ac = RAPparams->get<RCP<Matrix> >("graph");
+          Ac = RAPparams->get<RCP<Matrix>>("graph");
 
         // Some eigenvalue may have been cached with the matrix in the previous run.
         // As the matrix values will be updated, we need to reset the eigenvalue.
@@ -249,7 +275,7 @@ void RAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Level& fineLev
                         doOptimizeStorage, labelstr + std::string("MueLu::R*A*P-implicit-") + levelstr.str(),
                         RAPparams);
       } else {
-        RCP<Matrix> R = Get<RCP<Matrix> >(coarseLevel, "R");
+        RCP<Matrix> R = Get<RCP<Matrix>>(coarseLevel, "R");
         Ac            = MatrixFactory::Build(R->getRowMap(), Teuchos::as<LO>(0));
 
         SubFactoryMonitor m2(*this, "MxMxM: R x A x P (explicit)", coarseLevel);
@@ -260,7 +286,7 @@ void RAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Level& fineLev
                         RAPparams);
       }
 
-      Teuchos::ArrayView<const double> relativeFloor = pL.get<Teuchos::Array<double> >("rap: relative diagonal floor")();
+      Teuchos::ArrayView<const double> relativeFloor = pL.get<Teuchos::Array<double>>("rap: relative diagonal floor")();
       if (relativeFloor.size() > 0) {
         Xpetra::MatrixUtils<SC, LO, GO, NO>::RelativeDiagonalBoost(Ac, relativeFloor, GetOStream(Statistics2));
       }
@@ -309,7 +335,7 @@ void RAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Level& fineLev
     SubFactoryMonitor m(*this, "Projections", coarseLevel);
 
     // call Build of all user-given transfer factories
-    for (std::vector<RCP<const FactoryBase> >::const_iterator it = transferFacts_.begin(); it != transferFacts_.end(); ++it) {
+    for (std::vector<RCP<const FactoryBase>>::const_iterator it = transferFacts_.begin(); it != transferFacts_.end(); ++it) {
       RCP<const FactoryBase> fac = *it;
       GetOStream(Runtime0) << "RAPFactory: call transfer factory: " << fac->description() << std::endl;
       fac->CallBuild(coarseLevel);

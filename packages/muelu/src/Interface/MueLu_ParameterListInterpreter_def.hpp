@@ -1143,6 +1143,7 @@ void ParameterListInterpreter<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     dropFactory->SetParameterList(dropParams);
   }
   manager.SetFactory("Graph", dropFactory);
+  manager.SetFactory("MinvA", dropFactory);
 
 // Aggregation scheme
 #ifndef HAVE_MUELU_MATLAB
@@ -1330,7 +1331,6 @@ void ParameterListInterpreter<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   } else {
     RAP = rcp(new RAPFactory());
   }
-
   MUELU_TEST_AND_SET_PARAM_2LIST(paramList, defaultList, "rap: relative diagonal floor", Teuchos::Array<double>, RAPparams);
 
   if (paramList.isSublist("matrixmatrix: kernel params"))
@@ -1367,6 +1367,7 @@ void ParameterListInterpreter<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
   if (!RAP.is_null()) {
     RAP->SetParameterList(RAPparams);
     RAP->SetFactory("P", manager.GetFactory("P"));
+    RAP->SetFactory("MinvA", manager.GetFactory("MinvA"));
   } else {
     RAPs->SetParameterList(RAPparams);
     RAPs->SetFactory("P", manager.GetFactory("P"));

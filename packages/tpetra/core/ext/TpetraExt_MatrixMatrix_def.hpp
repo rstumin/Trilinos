@@ -2318,11 +2318,8 @@ void KernelWrappers<Scalar, LocalOrdinal, GlobalOrdinal, Node, LocalOrdinalViewT
           LO Bkj = Bcolind[j];
           LO Cij = Bcol2Ccol[Bkj];
 
-          TEUCHOS_TEST_FOR_EXCEPTION(c_status[Cij] < OLD_ip || c_status[Cij] >= CSR_ip,
-                                     std::runtime_error, "Trying to insert a new entry (" << i << "," << Cij << ") into a static graph "
-                                                                                          << "(c_status = " << c_status[Cij] << " of [" << OLD_ip << "," << CSR_ip << "))");
-
-          Cvals[c_status[Cij]] += Aval * Bvals[j];
+          if (c_status[Cij] >= OLD_ip && c_status[Cij] < CSR_ip)
+            Cvals[c_status[Cij]] += Aval * Bvals[j];
         }
 
       } else {
@@ -2332,11 +2329,8 @@ void KernelWrappers<Scalar, LocalOrdinal, GlobalOrdinal, Node, LocalOrdinalViewT
           LO Ikj = Icolind[j];
           LO Cij = Icol2Ccol[Ikj];
 
-          TEUCHOS_TEST_FOR_EXCEPTION(c_status[Cij] < OLD_ip || c_status[Cij] >= CSR_ip,
-                                     std::runtime_error, "Trying to insert a new entry (" << i << "," << Cij << ") into a static graph "
-                                                                                          << "(c_status = " << c_status[Cij] << " of [" << OLD_ip << "," << CSR_ip << "))");
-
-          Cvals[c_status[Cij]] += Aval * Ivals[j];
+          if (c_status[Cij] >= OLD_ip && c_status[Cij] < CSR_ip)
+            Cvals[c_status[Cij]] += Aval * Ivals[j];
         }
       }
     }
