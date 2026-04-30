@@ -172,6 +172,7 @@ const RCP<const FactoryBase> FactoryManager<Scalar, LocalOrdinal, GlobalOrdinal,
     // Non-Galerkin
     if (varName == "K") return GetFactory("A");
     if (varName == "M") return GetFactory("A");
+    if (varName == "Minv") return GetFactory("A");
     if (varName == "Mdiag") return GetFactory("A");
     if (varName == "cfl-based shift array") return GetFactory("A");
 

@@ -27,6 +27,7 @@
 #include "MueLu_MasterList.hpp"
 #include "MueLu_Monitor.hpp"
 #include "MueLu_Utilities.hpp"
+#include "MueLu_FactoryManager_decl.hpp"
 
 #include "MueLu_BoundaryDetection.hpp"
 #include "MueLu_DroppingCommon.hpp"
@@ -40,6 +41,7 @@
 #include "MueLu_VectorDroppingClassical.hpp"
 #include "MueLu_VectorDroppingDistanceLaplacian.hpp"
 
+#include <MueLu_InverseApproximationFactory.hpp>
 namespace MueLu {
 
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
@@ -89,7 +91,7 @@ RCP<const ParameterList> CoalesceDropFactory_kokkos<Scalar, LocalOrdinal, Global
   validParamList->getEntry("aggregation: classical algo").setValidator(rcp(new Teuchos::StringValidator(Teuchos::tuple<std::string>("default", "unscaled cut", "scaled cut", "scaled cut symmetric"))));
   validParamList->getEntry("aggregation: distance laplacian algo").setValidator(rcp(new Teuchos::StringValidator(Teuchos::tuple<std::string>("default", "unscaled cut", "scaled cut", "scaled cut symmetric"))));
 #endif
-  validParamList->getEntry("aggregation: strength-of-connection: matrix").setValidator(rcp(new Teuchos::StringValidator(Teuchos::tuple<std::string>("A", "distance laplacian"))));
+  validParamList->getEntry("aggregation: strength-of-connection: matrix").setValidator(rcp(new Teuchos::StringValidator(Teuchos::tuple<std::string>("A", "distance laplacian", "MinvA"))));
   validParamList->getEntry("aggregation: strength-of-connection: measure").setValidator(rcp(new Teuchos::StringValidator(Teuchos::tuple<std::string>("smoothed aggregation", "signed smoothed aggregation", "signed ruge-stueben", "unscaled"))));
   validParamList->getEntry("aggregation: distance laplacian metric").setValidator(rcp(new Teuchos::StringValidator(Teuchos::tuple<std::string>("unweighted", "material"))));
 
@@ -98,6 +100,9 @@ RCP<const ParameterList> CoalesceDropFactory_kokkos<Scalar, LocalOrdinal, Global
   validParamList->set<RCP<const FactoryBase>>("Coordinates", Teuchos::null, "Generating factory for Coordinates");
   validParamList->set<RCP<const FactoryBase>>("BlockNumber", Teuchos::null, "Generating factory for BlockNumber");
   validParamList->set<RCP<const FactoryBase>>("Material", Teuchos::null, "Generating factory for Material");
+  validParamList->set<RCP<const FactoryBase>>("M", Teuchos::null, "Generating factory for M");
+  validParamList->set<RCP<const FactoryBase>>("Minv", Teuchos::null, "Generating factory for Minv");
+  validParamList->set<RCP<const FactoryBase>>("MinvA", Teuchos::null, "Generating factory for M");
 
   return validParamList;
 }
@@ -111,6 +116,7 @@ void CoalesceDropFactory_kokkos<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Decl
 
   std::string socUsesMatrix = pL.get<std::string>("aggregation: strength-of-connection: matrix");
   bool needCoords           = (socUsesMatrix == "distance laplacian");
+  bool needM                = (socUsesMatrix == "MinvA");
 #ifdef HAVE_MUELU_COALESCEDROP_ALLOW_OLD_PARAMETERS
   std::string droppingMethod = pL.get<std::string>("aggregation: drop scheme");
   needCoords |= (droppingMethod.find("distance laplacian") != std::string::npos);
@@ -120,6 +126,16 @@ void CoalesceDropFactory_kokkos<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Decl
     std::string distLaplMetric = pL.get<std::string>("aggregation: distance laplacian metric");
     if (distLaplMetric == "material")
       Input(currentLevel, "Material");
+  }
+  if (needM) {
+    Input(currentLevel, "M");
+    // Not sure if this is correct. Previously had 'Input(currentLevel, "Minv");', but
+    // this causes problems if not supplied by application. Perhaps we never need to use
+    // Input() for Minv as it is either created by MueLu_CoalesceDropFactory_kokkos_def
+    // or it is supplied external to MueLu. If we needed to make a conditional Input(),
+    // we could check  parameter list. for
+    //    Minv = Teuchos::RCP<MueLu::FactoryBase const>{ptr=0,node=0,strong_count=0,weak_count=0}
+    Input(currentLevel, "MinvA");
   }
 
   bool useBlocking = pL.get<bool>("aggregation: use blocking");
@@ -450,6 +466,88 @@ std::tuple<GlobalOrdinal, typename MueLu::LWGraph_kokkos<LocalOrdinal, GlobalOrd
           ScalarDroppingDistanceLaplacian<Scalar, LocalOrdinal, GlobalOrdinal, Node, Misc::SignedRugeStuebenMeasure>::runDroppingFunctors_on_dlap(*A, results, filtered_rowptr, nnz_filtered, boundaryNodes, droppingMethod, threshold, aggregationMayCreateDirichlet, symmetrizeDroppedGraph, useBlocking, distanceLaplacianMetric, currentLevel, *this);
         } else if (socUsesMeasure == "signed smoothed aggregation") {
           ScalarDroppingDistanceLaplacian<Scalar, LocalOrdinal, GlobalOrdinal, Node, Misc::SignedSmoothedAggregationMeasure>::runDroppingFunctors_on_dlap(*A, results, filtered_rowptr, nnz_filtered, boundaryNodes, droppingMethod, threshold, aggregationMayCreateDirichlet, symmetrizeDroppedGraph, useBlocking, distanceLaplacianMetric, currentLevel, *this);
+        }
+      } else if (socUsesMatrix == "MinvA") {
+        // First check if MinvA is already available, which would be the case on coarser
+        // levels when it is projected from the finest grid. If this is not available,
+        // check to see if Minv is available. This might be the case if the user/application
+        // has precomputed it and passed it into MueLu as user data. If this is not available,
+        // check if M is available (i.e., passed into to MueLu as user data). In this case,
+        // we compute a sparse approximate inverse of M.  If M is also not available ,
+        // we throw as MinvA cannot be computed.
+
+        RCP<CrsMatrixWrap> TruncMinvAcrs;
+        RCP<Matrix> TruncMinvA;
+        bool status = currentLevel.IsAvailable("MinvA", NoFactory::get());
+        if (status) {
+          TruncMinvA    = currentLevel.Get<RCP<Matrix>>("MinvA", NoFactory::get());
+          TruncMinvAcrs = rcp_dynamic_cast<CrsMatrixWrap>(TruncMinvA);
+        } else {
+          RCP<Matrix> Minv;
+          bool status2 = currentLevel.IsAvailable("Minv", NoFactory::get());
+          if (status2) {
+            Minv = Get<RCP<Matrix>>(currentLevel, "Minv");
+          } else {
+            bool status3 = currentLevel.IsAvailable("M", NoFactory::get());
+            TEUCHOS_TEST_FOR_EXCEPTION(!status3, Exceptions::RuntimeError, "When \"aggregation: strength-of-connection: matrix\" = \"MinvA\", either M, Minv, or MinvA must be supplied");
+
+            auto M = Get<RCP<Matrix>>(currentLevel, "M");
+            // Create Minv via sparse apprximate inverse
+
+            Level miniLevel;
+            Teuchos::RCP<MueLu::FactoryManager<SC, LO, GO, NO>> factoryHandler = Teuchos::rcp(new MueLu::FactoryManager<SC, LO, GO, NO>());
+            miniLevel.SetFactoryManager(factoryHandler);
+            miniLevel.SetLevelID(0);
+#ifdef HAVE_MUELU_TIMER_SYNCHRONIZATION
+            miniLevel.SetComm(M->getRowMap()->getComm());
+#endif
+            miniLevel.Set("A", M);
+            auto invapproxFact = rcp(new InverseApproximationFactory());
+            invapproxFact->SetFactory("A", MueLu::NoFactory::getRCP());
+            invapproxFact->SetParameter("inverse: approximation type", Teuchos::ParameterEntry(std::string("sparseapproxinverse")));
+            miniLevel.Request("Ainv", invapproxFact.get());
+            invapproxFact->Build(miniLevel);
+            Minv = miniLevel.Get<RCP<Matrix>>("Ainv", invapproxFact.get());
+          }
+
+          // build MinvA matrix with same sparsity pattern as A.
+
+          TruncMinvA  = Xpetra::MatrixFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::BuildCopy(A);
+          auto params = Teuchos::rcp(new Teuchos::ParameterList());
+          params->set("MM Throw For Non-Existent Entries", false);
+          TruncMinvA = Xpetra::MatrixMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Multiply(*Minv, false, *A, false, TruncMinvA, GetOStream(Runtime0), true, true, std::string("MinvA"), params);
+
+          TruncMinvAcrs = rcp_dynamic_cast<CrsMatrixWrap>(TruncMinvA);
+          currentLevel.Set("MinvA", TruncMinvA, NoFactory::get());
+#ifdef JustUsingDiagMforInverse
+          else {
+            // could perhaps be useful for debugging?
+            // Need to Ifdef out above code from else just above status3 declaration all the way to here and then change code below that refers to
+            // TruncMinvA so that it instead refers to diagMinvA.
+            //
+            // get the diagonal inverse of M (TODO: using InverseApproximationFactory is likely better)
+            Teuchos::RCP<Vector> MinvDiag = Utilities::GetMatrixDiagonalInverse(*M);
+            // build MinvA using the graph of A
+            auto diagMinvA = MatrixFactory::BuildCopy(A);
+            // multiply MinvDiag through
+            diagMinvA->leftScale(*MinvDiag);
+            // set diagMinvA on this level
+            Set(currentLevel, "MinvA", diagMinvA);
+          }
+#endif
+        }
+        if (socUsesMeasure == "unscaled") {
+          ScalarDroppingClassical<Scalar, LocalOrdinal, GlobalOrdinal, Node, Misc::UnscaledMeasure>::runDroppingFunctors_on_A(*TruncMinvAcrs, results, filtered_rowptr, nnz_filtered, boundaryNodes, droppingMethod, threshold,
+                                                                                                                              aggregationMayCreateDirichlet, symmetrizeDroppedGraph, useBlocking, currentLevel, *this);
+        } else if (socUsesMeasure == "smoothed aggregation") {
+          ScalarDroppingClassical<Scalar, LocalOrdinal, GlobalOrdinal, Node, Misc::SmoothedAggregationMeasure>::runDroppingFunctors_on_A(*TruncMinvAcrs, results, filtered_rowptr, nnz_filtered, boundaryNodes, droppingMethod, threshold,
+                                                                                                                                         aggregationMayCreateDirichlet, symmetrizeDroppedGraph, useBlocking, currentLevel, *this);
+        } else if (socUsesMeasure == "signed ruge-stueben") {
+          ScalarDroppingClassical<Scalar, LocalOrdinal, GlobalOrdinal, Node, Misc::SignedRugeStuebenMeasure>::runDroppingFunctors_on_A(*TruncMinvAcrs, results, filtered_rowptr, nnz_filtered, boundaryNodes, droppingMethod, threshold,
+                                                                                                                                       aggregationMayCreateDirichlet, symmetrizeDroppedGraph, useBlocking, currentLevel, *this);
+        } else if (socUsesMeasure == "signed smoothed aggregation") {
+          ScalarDroppingClassical<Scalar, LocalOrdinal, GlobalOrdinal, Node, Misc::SignedSmoothedAggregationMeasure>::runDroppingFunctors_on_A(*TruncMinvAcrs, results, filtered_rowptr, nnz_filtered, boundaryNodes, droppingMethod, threshold,
+                                                                                                                                               aggregationMayCreateDirichlet, symmetrizeDroppedGraph, useBlocking, currentLevel, *this);
         }
       }
     } else {

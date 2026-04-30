@@ -1019,6 +1019,86 @@ TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(CoalesceDropFactory_kokkos, DistanceLaplacianS
 
 }  // DistanceLaplacianSgndRugeStuebenDistribLump
 
+TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(CoalesceDropFactory_kokkos, MassMatrixSOC, Scalar, LocalOrdinal, GlobalOrdinal, Node) {
+#include <MueLu_UseShortNames.hpp>
+  typedef Teuchos::ScalarTraits<SC> STS;
+  typedef typename STS::magnitudeType real_type;
+  typedef Xpetra::MultiVector<real_type, LO, GO, NO> RealValuedMultiVector;
+  using TMT = Teuchos::ScalarTraits<typename Teuchos::ScalarTraits<Scalar>::magnitudeType>;
+
+  MUELU_TESTING_SET_OSTREAM;
+  MUELU_TESTING_LIMIT_SCOPE(Scalar, GlobalOrdinal, Node);
+  out << "version: " << MueLu::Version() << std::endl;
+
+  RCP<const Teuchos::Comm<int>> comm = Parameters::getDefaultComm();
+
+  RCP<Matrix> A;
+  RCP<RealValuedMultiVector> coordinates;
+  {
+    Teuchos::ParameterList galeriList;
+    galeriList.set("nx", Teuchos::as<GlobalOrdinal>(36));
+    A           = TestHelpers_kokkos::TestFactory<SC, LO, GO, NO>::Build1DPoisson(36);
+    coordinates = Galeri::Xpetra::Utils::CreateCartesianCoordinates<SC, LO, GO, Map, RealValuedMultiVector>("1D", A->getRowMap(), galeriList);
+  }
+
+  RCP<Matrix> filteredA;
+  {
+    Level fineLevel;
+    TestHelpers_kokkos::TestFactory<SC, LO, GO, NO>::createSingleLevelHierarchy(fineLevel);
+    fineLevel.Set("A", A);
+    RCP<Matrix> M = MatrixFactory::BuildCopy(A);  // set M = A on the fine level for testing
+    fineLevel.Set("M", M);
+
+    CoalesceDropFactory_kokkos coalesceDropFact;
+    coalesceDropFact.SetDefaultVerbLevel(MueLu::Extreme);
+    coalesceDropFact.SetParameter("aggregation: drop tol", Teuchos::ParameterEntry(.95));  // TODO: GH this is huge
+    coalesceDropFact.SetParameter("filtered matrix: reuse graph", Teuchos::ParameterEntry(false));
+    coalesceDropFact.SetParameter("aggregation: drop scheme", Teuchos::ParameterEntry(std::string("point-wise")));
+    coalesceDropFact.SetParameter("aggregation: strength-of-connection: measure", Teuchos::ParameterEntry(std::string("smoothed aggregation")));
+    coalesceDropFact.SetParameter("aggregation: strength-of-connection: matrix", Teuchos::ParameterEntry(std::string("MinvA")));
+    fineLevel.Request("Graph", &coalesceDropFact);
+    fineLevel.Request("A", &coalesceDropFact);
+    fineLevel.Request("M", &coalesceDropFact);
+    fineLevel.Request("DofsPerNode", &coalesceDropFact);
+
+    coalesceDropFact.Build(fineLevel);
+
+    filteredA = fineLevel.Get<RCP<Matrix>>("A", &coalesceDropFact);
+  }
+
+  // if we didn't crash, something worked :)
+
+  // All interior rows have 2 nonzeros.
+  // If we instead chose "no lumping", the diagonal would be 2 and the off-diagonal would be -1
+  // If we instead chose "diag lumping", the diagonal would be 1 and the off-diagonal would be -1
+  // Since we chose "distributed lumping", the diagonal would be 4/3 and the off-diagonal shoudl be -4/3
+
+  // {
+  //   auto lclFilteredA = filteredA->getLocalMatrixHost();
+
+  //   SC thevalue;
+  //   bool fourThirdsExists    = false;
+  //   bool negFourThirdsExists = false;
+  //   bool hasValidValues      = true;
+  //   // check that all filtered values are either 2, -1, 4/3, -4/3
+  //   // check that at least one row has a 4/3 and that at least one row has -4/3 .
+  //   for (size_t entry = 0; entry < lclFilteredA.graph.entries.extent(0); ++entry) {
+  //     thevalue = lclFilteredA.values(entry);
+  //     if ((Teuchos::ScalarTraits<SC>::magnitude(thevalue - as<Scalar>(4. / 3.)) < 100 * TMT::eps())) fourThirdsExists = true;
+  //     if ((Teuchos::ScalarTraits<SC>::magnitude(thevalue + as<Scalar>(4. / 3.)) < 100 * TMT::eps())) negFourThirdsExists = true;
+  //     if ((Teuchos::ScalarTraits<SC>::magnitude(thevalue - as<Scalar>(2.0)) > 100 * TMT::eps()) &&
+  //         (Teuchos::ScalarTraits<SC>::magnitude(thevalue + as<Scalar>(1.0)) > 100 * TMT::eps()) &&
+  //         (Teuchos::ScalarTraits<SC>::magnitude(thevalue - as<Scalar>(4. / 3.)) > 100 * TMT::eps()) &&
+  //         (Teuchos::ScalarTraits<SC>::magnitude(thevalue + as<Scalar>(4. / 3.)) > 100 * TMT::eps())) hasValidValues = false;
+  //   }
+  //   TEST_EQUALITY(hasValidValues, true);
+  //   // The if's below avoid a test failure just because a processor contains no interior rows
+  //   if (lclFilteredA.graph.entries.extent(0) > 1) TEST_EQUALITY(fourThirdsExists, true);
+  //   if (lclFilteredA.graph.entries.extent(0) > 1) TEST_EQUALITY(negFourThirdsExists, true);
+  // }
+
+}  // MassMatrixSOC
+
 TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(CoalesceDropFactory_kokkos, ClassicalScaledCut, Scalar, LocalOrdinal, GlobalOrdinal, Node) {
 #include <MueLu_UseShortNames.hpp>
   typedef Teuchos::ScalarTraits<SC> STS;
@@ -3405,6 +3485,7 @@ TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(CoalesceDropFactory_kokkos, CountNegativeDiago
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(CoalesceDropFactory_kokkos, DistanceLaplacian, SC, LO, GO, NO)                           \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(CoalesceDropFactory_kokkos, DistanceLaplacianScaledCut, SC, LO, GO, NO)                  \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(CoalesceDropFactory_kokkos, DistanceLaplacianSgndRugeStuebenDistribLump, SC, LO, GO, NO) \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(CoalesceDropFactory_kokkos, MassMatrixSOC, SC, LO, GO, NO)                               \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(CoalesceDropFactory_kokkos, DistanceLaplacianUnscaledCut, SC, LO, GO, NO)                \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(CoalesceDropFactory_kokkos, DistanceLaplacianCutSym, SC, LO, GO, NO)                     \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(CoalesceDropFactory_kokkos, DistanceLaplacianScalarMaterial, SC, LO, GO, NO)             \
