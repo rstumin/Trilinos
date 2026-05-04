@@ -135,7 +135,6 @@ void CoalesceDropFactory_kokkos<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Decl
     // or it is supplied external to MueLu. If we needed to make a conditional Input(),
     // we could check  parameter list. for
     //    Minv = Teuchos::RCP<MueLu::FactoryBase const>{ptr=0,node=0,strong_count=0,weak_count=0}
-    Input(currentLevel, "MinvA");
   }
 
   bool useBlocking = pL.get<bool>("aggregation: use blocking");
